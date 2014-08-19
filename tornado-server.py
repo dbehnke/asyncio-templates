@@ -1,9 +1,70 @@
-# import tornado.ioloop
 import tornado.web
 
 from tornado.platform.asyncio import AsyncIOMainLoop
 import asyncio
 import logging
+
+from concurrent.futures import ThreadPoolExecutor
+thread_pool = ThreadPoolExecutor(max_workers=20)
+
+#initialize test database
+from sa import models
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+
+#sqlite memory (broken - has issues with table created in another thread)
+#from sqlalchemy.pool import StaticPool
+#db_engine = create_engine('sqlite:///:memory:', echo=False,
+#                          connect_args={'check_same_thread': False},
+#                          poolclass=StaticPool)
+
+#sqlite - file based (kinda broken - works as long as not too much concurrency)
+#db_engine = create_engine('sqlite:///test.db', echo=False)
+
+#oracle
+#requires cx_Oracle module
+from sqlalchemy.pool import QueuePool
+
+#for oracle uncomment either SID or Service connect_string
+#SID based
+'''
+connect_string = """oracle+cx_oracle://user:pass@
+            (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)
+            (HOST = hostname)(PORT = 1521))
+            (CONNECT_DATA = (SERVER = DEDICATED) (SID = sidhere)))"""
+'''
+#Service based
+connect_string = """oracle+cx_oracle://test:testing@
+            (DESCRIPTION = (ADDRESS = (PROTOCOL = TCP)
+            (HOST = onyx)(PORT = 1521))
+            (CONNECT_DATA = (SERVER = DEDICATED) (SERVICE_NAME = pdb)))"""
+
+db_engine = create_engine(connect_string,
+                          poolclass=QueuePool,
+                          pool_size=10,
+                          pool_recycle=300,
+                          echo=True)
+
+#postgres
+#requires the psycopg2 module
+#from sqlalchemy.pool import QueuePool
+#db_engine = create_engine('postgresql://test:testing@localhost/test',
+#                          poolclass=QueuePool,
+#                          pool_size=10,
+#                          pool_recycle=300,
+#                          echo=True)
+
+
+DBSession = scoped_session(
+    sessionmaker(
+        autoflush=True,
+        autocommit=False,
+        bind=db_engine
+    )
+)
+
+base = models.Base
+base.metadata.create_all(db_engine)
 
 
 # idea from https://gist.github.com/BeholdMyGlory/11067131
@@ -35,11 +96,27 @@ def future_wrapper(f):
     return future
 
 
+def dbtest():
+    session = DBSession()
+    try:
+        h = models.Hash()
+        h.k = 'Hello'
+        h.v = 'World'
+        session.add(h)
+        session.commit()
+        session.refresh(h)
+        session.close()
+        return h
+    finally:
+        DBSession.remove()
+
+
 class MainHandler(tornado.web.RequestHandler):
     @coroutine
     def get(self):
-        yield from asyncio.sleep(2)
-        self.write("Hello, world")
+        loop = asyncio.get_event_loop()
+        h = yield from loop.run_in_executor(thread_pool, dbtest)
+        self.write(str(h.id).encode())
 
 
 app = tornado.web.Application([
